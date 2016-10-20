@@ -7,6 +7,7 @@
         ,UndecidableInstances
         ,TemplateHaskell
         ,QuasiQuotes
+        ,FunctionalDependencies
         ,OverloadedStrings
         ,GeneralizedNewtypeDeriving
         ,StandaloneDeriving
@@ -49,22 +50,36 @@ data (:+:) x y (a :: k0) (b :: k1) = L (x a b) | R (y a b)
 
 makePrisms ''(:+:)
 
-instance Lifting (Lifting Eq) f => Lifting Eq (Fix f) where
+instance (Lifting HasLit f
+         ,IsExpr f 
+         ,LiftWith Monad (Lifting Eq) f)
+        => Lifting Eq (Fix f) where
     lifting = Sub Dict
 
-instance (Eq v,Lifting (Lifting Eq) f) => Eq (Fix f v) where
+instance (Eq v
+         ,Lifting HasLit f
+         ,IsExpr f 
+         ,LiftWith Monad (Lifting Eq) f) 
+        => Eq (Fix f v) where
     Fix x == Fix y = x == y
         C.\\ (lifting :: Eq v :- Eq (f (Fix f) v))
-        C.\\ (lifting :: Lifting Eq (Fix f) :- Lifting Eq (f (Fix f)))
+        C.\\ (lifting' :: (Lifting Eq (Fix f),Monad (Fix f)) :- Lifting Eq (f (Fix f)))
 
-instance (Lifting (Lifting Ord) f,Lifting (Lifting Eq) f) 
+instance (LiftWith (Monad & Lifting Eq) (Lifting Ord) f
+         ,LiftWith Monad (Lifting Eq) f
+         ,Lifting HasLit f
+         ,IsExpr f) 
         => Lifting Ord (Fix f) where
     lifting = Sub Dict
 
-instance (Ord v,Lifting (Lifting Eq) f,Lifting (Lifting Ord) f) => Ord (Fix f v) where
+instance (Ord v,LiftWith Monad (Lifting Eq) f
+         ,LiftWith (Monad & Lifting Eq) (Lifting Ord) f
+         ,IsExpr f
+         ,Lifting HasLit f) 
+        => Ord (Fix f v) where
     Fix x `compare` Fix y = x `compare` y
         C.\\ (lifting :: Ord v :- Ord (f (Fix f) v))
-        C.\\ (lifting :: Lifting Ord (Fix f) :- Lifting Ord (f (Fix f)))
+        C.\\ (lifting' :: (Lifting Ord (Fix f),(Monad & Lifting Eq) (Fix f)) :- Lifting Ord (f (Fix f)))
 
 instance (IsExpr f,Lifting Functor f,Lifting HasLit f,LiftWith Monad (Lifting Show) f) 
         => Lifting Show (Fix f) where
@@ -97,17 +112,38 @@ instance (Lifting Functor f,Lifting Foldable f,Lifting Traversable f)
     traverse f (Fix x) = Fix <$> traverse f x
                 C.\\ (lifting :: Traversable (Fix f) :- Traversable (f (Fix f)))
 
+liftFunctor :: (Lifting c f,Lifting c g)
+            => (c (f a),c (g a)) :- c ((f :+: g) a)
+            -> c a :- ((c (f a),c (g a)),c ((f :+: g) a))
+liftFunctor p = (lifting &&& lifting) >>> (id &&& p)
+
+instance (Lifting Foldable f,Lifting Foldable g) 
+        => Lifting Foldable (f :+: g) where
+    lifting = liftFunctor (Sub Dict) >>> weaken2
+
+instance (Foldable (f e),Foldable (g e)) => Foldable ((f :+: g) e) where
+    foldMap f (L x) = foldMap f x
+    foldMap f (R x) = foldMap f x
+
 instance (Lifting Eq e,Monad e,LiftWith Monad (Lifting Eq) f,LiftWith Monad (Lifting Eq) g) 
         => Lifting Eq ((f :+: g) (e :: * -> *)) where
     lifting = myLift' (Sub Dict) . myLift
             C.\\ (lifting' :: (Lifting Eq e,Monad e) :- Lifting Eq (f e))
             C.\\ (lifting' :: (Lifting Eq e,Monad e) :- Lifting Eq (g e))
+instance (LiftWith (Monad & Lifting Eq) (Lifting Ord) f
+         ,LiftWith (Monad & Lifting Eq) (Lifting Ord) g)
+            => LiftWith (Monad & Lifting Eq) (Lifting Ord) (f :+: g) where
+    lifting' = Sub Dict
 
-instance (Lifting Ord e,Lifting (Lifting Ord) f,Lifting (Lifting Ord) g) 
+instance (Lifting Ord e
+         ,Monad e
+         ,Lifting Eq e
+         ,LiftWith (Monad & Lifting Eq) (Lifting Ord) f
+         ,LiftWith (Monad & Lifting Eq) (Lifting Ord) g) 
         => Lifting Ord ((f :+: g) (e :: * -> *)) where
     lifting = myLift' (Sub Dict) . myLift
-            C.\\ (lifting :: Lifting Ord e :- Lifting Ord (f e))
-            C.\\ (lifting :: Lifting Ord e :- Lifting Ord (g e))
+            C.\\ (lifting' :: (Lifting Ord e,(Monad & Lifting Eq) e) :- Lifting Ord (f e))
+            C.\\ (lifting' :: (Lifting Ord e,(Monad & Lifting Eq) e) :- Lifting Ord (g e))
 
 instance (Lifting Show e,Monad e,LiftWith Monad (Lifting Show) f,LiftWith Monad (Lifting Show) g) 
         => Lifting Show ((f :+: g) (e :: * -> *)) where
@@ -188,15 +224,15 @@ instance (LiftWith Monad (Lifting Eq) f,LiftWith Monad (Lifting Eq) g)
         => LiftWith Monad (Lifting Eq) (f :+: g) where
     lifting' = Sub Dict
 
-instance (Lifting (Lifting Ord) f,Lifting (Lifting Ord) g)
-        => Lifting (Lifting Ord) (f :+: g) where
-    lifting = Sub Dict
+-- instance (LiftWith Monad (Lifting Ord) f,Lifting (Lifting Ord) g)
+--         => Lifting (Lifting Ord) (f :+: g) where
+--     lifting = Sub Dict
 
 instance (LiftWith Monad (Lifting Show) f,LiftWith Monad (Lifting Show) g)
         => LiftWith Monad (Lifting Show) (f :+: g) where
     lifting' = Sub Dict
 
-class LiftWith p (c :: k -> Constraint) f where
+class LiftWith p (c :: k -> Constraint) f | c -> p where
     lifting' :: (c a, p a) :- c (f a)
 
 myLift :: forall a c e f g. (Lifting c (f e),Lifting c (g e))
@@ -215,15 +251,23 @@ idC _ = id
 instance (Lifting HasLit expr,IsExpr expr) => Show (Pretty (Fix expr Var)) where
     show = pretty . unPretty
 
+mapRec :: Monomorphic f
+       => (v0 -> v1)
+       -> (expr0 v0 -> expr1 v1)
+       -> f expr0 v0
+       -> f expr1 v1
+mapRec f g = runIdentity . mapRecA (Identity . f) (Identity . g)
+
 class Monomorphic f where 
-    mapRec :: (v0 -> v1)
-           -> (expr0 v0 -> expr1 v1)
-           -> f expr0 v0
-           -> f expr1 v1
+    mapRecA :: Applicative m
+            => (v0 -> m v1)
+            -> (expr0 v0 -> m (expr1 v1))
+            -> f expr0 v0
+            -> m (f expr1 v1)
 
 instance (Monomorphic f,Monomorphic g) => Monomorphic (f :+: g) where
-    mapRec g f (L x) = L $ mapRec g f x
-    mapRec g f (R x) = R $ mapRec g f x
+    mapRecA g f (L x) = L <$> mapRecA g f x
+    mapRecA g f (R x) = R <$> mapRecA g f x
 
 instance (Arbitrary (p f a),Arbitrary (q f a)) => Arbitrary ((p :+: q) f a) where
     -- arbitrary = oneof [L <$> arbitrary]
@@ -242,3 +286,6 @@ newtype Pretty a = Pretty { unPretty :: a }
 instance Arbitrary a => Arbitrary (Pretty a) where
     arbitrary = Pretty <$> arbitrary
     shrink = genericShrink
+
+class (p a, q a) => (&) p q (a :: k) where
+instance (p a, q a) => (&) p q (a :: k) where
